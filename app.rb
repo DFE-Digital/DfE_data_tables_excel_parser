@@ -9,7 +9,7 @@ sheets_to_process = [
     name: 'SC_Pupil_01-02_to_17-18_SUM', 
     data_blocks: [
       { header_row: 5, last_row: 94 },
-      { header_row: 100, last_row: 137 } }
+      { header_row: 100, last_row: 137 }
     ]
   },{
     name: 'SC_Addresses_05-06_to_17-18_SUM', 
@@ -43,7 +43,7 @@ sheets_to_process = [
     name: 'EYFSP_02-03_to_17-18', 
     data_blocks: [
       { header_row: 5, last_row: 26 },
-      { header_row: 34, last_row: 193 } }
+      { header_row: 34, last_row: 193 }
     ]
   },{
     name: 'Phonics_11-12_to_17-18', 
@@ -163,9 +163,10 @@ sheets_to_process = [
 sheets_to_process.each do |sheet|
   puts sheet[:name]
   sheet[:data_blocks].each do |block|
-    puts data_tables_workbook.sheet(sheet[:name]).row(block[:header_row])
+    block_name = block[:table_name] || sheet[:name]
+    puts "\t#{block_name}: #{data_tables_workbook.sheet(sheet[:name]).row(block[:header_row])[0]}"
   end
   
-  #puts sheet.row(5)
+  #puts sheet.row(5).cell(1)
   #puts "---------"
 end

@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 require 'roo'
 
-data_tables_path = '/Volumes/Twilight/Users/rb/Documents/Slate Horse/clients/Nimble/2018-11-17 NPD post-alpha/data_tables_parser/data/NPD Tables Oct18 20181010.xlsx'
+data_tables_path = './data/NPD Tables Oct18 20181010.xlsx'
 data_tables_workbook = Roo::Spreadsheet.open(data_tables_path)
 
 sheets_to_process = [
@@ -60,8 +60,10 @@ sheets_to_process = [
   },{
     name: 'KS2_95-96_to_17-18', 
     data_blocks: [
-      { header_row: 5, last_row: 103 },
-      { header_row: 110, last_row: 555 }
+      { header_row: 5, first_row: 7, last_row: 91 },
+      { header_row: 5, first_row: 94, last_row: 103 },
+      { header_row: 110, first_row: 112, last_row: 507 },
+      { header_row: 110, first_row: 510,last_row: 555 }
     ]
   },{
     name: 'Year_7_00-01_to_06-07', 
@@ -73,10 +75,10 @@ sheets_to_process = [
     name: 'KS3_97-98_to_12-13', 
     data_blocks: [
       { header_row: 5, first_row: 7, last_row: 16, table_name: 'KS3_Candidate' },
-      { header_row: 5, first_row: 27, last_row: 69, table_name: 'KS3_Indicators' },
-      { header_row: 5, first_row: 71, last_row: 74, table_name: 'KS3_Results' },
+      { header_row: 5, first_row: 28, last_row: 69, table_name: 'KS3_Indicators' },
+      { header_row: 5, first_row: 72, last_row: 74, table_name: 'KS3_Results' },
       { header_row: 81, first_row: 83, last_row: 96, table_name: 'KS3_Candidate' },
-      { header_row: 81, first_row: 98, last_row: 247, table_name: 'KS3_Indicators' },
+      { header_row: 81, first_row: 99, last_row: 247, table_name: 'KS3_Indicators' },
       { header_row: 81, first_row: 250, last_row: 296, table_name: 'KS3_Results' },
     ]
   },{
@@ -126,20 +128,22 @@ sheets_to_process = [
   },{
     name: 'Exclusions_05-06_to_16-17', 
     data_blocks: [
-      { header_row: 5, last_row: 68 },
-      { header_row: 76, last_row: 103 },
+      { header_row: 5, last_row: 59 },
+      { header_row: 5, first_row: 62, last_row: 68 },
+      { header_row: 76, last_row: 96 },
+      { header_row: 76, first_row: 99, last_row: 103 },
     ]
   },{
     name: 'PLAMS_07-08_to_16-17', 
     data_blocks: [
       { header_row: 5, last_row: 17 },
-      { header_row: 24, last_row: 58 }
+      { header_row: 24, last_row: 76 }
     ]
   },{
     name: 'NCCIS_10-11_to_16-17', 
     data_blocks: [
       { header_row: 5, last_row: 27 },
-      { header_row: 35, last_row: 76 }
+      { header_row: 35, last_row: 58 }
     ]
   },{
     name: 'ISP_09-10_to_12-13', 
@@ -160,13 +164,106 @@ sheets_to_process = [
   }
 ]
 
+
+require 'elasticsearch'
+
+client = Elasticsearch::Client.new url: 'http://localhost:9200', log: true
+
+# client.transport.reload_connections!
+# client.cluster.health
+
+puts "Results:"
+puts client.search q: 'test'
+
+# For each worksheet
 sheets_to_process.each do |sheet|
   puts sheet[:name]
+
+  # For each block within a sheet
   sheet[:data_blocks].each do |block|
     block_name = block[:table_name] || sheet[:name]
-    puts "\t#{block_name}: #{data_tables_workbook.sheet(sheet[:name]).row(block[:header_row])[0]}"
+    headers = data_tables_workbook.sheet(sheet[:name]).row(block[:header_row])
+
+    # Cast empty strings to nil
+    headers.map{|cell| (cell.instance_of?(String) && cell.empty?) ? nil : cell}
+
+    # Remove nils from the end of the header list
+    headers = headers.reverse.drop_while(&:nil?).reverse
+
+    # The first row is either explicitly specified OR the row after the header
+    first_row_number = block[:first_row] || (block[:header_row] +1)
+    last_row_number = block[:last_row]
+
+    
+    (first_row_number..last_row_number).each do |row_number|
+      row = data_tables_workbook.sheet(sheet[:name]).row(row_number)
+
+      next if row.compact.empty?
+
+      data_element = {
+        group_name: sheet[:name],
+        table_name: block_name,
+      }
+
+      row.each_with_index do |cell, index|
+        # Don't collect (generally empty) cells outside the table
+        next if headers[index].nil?
+
+        # Cast empty strings to nil, so we don't break the ElasticSearch ingestion
+        data_element[headers[index]] = (cell.instance_of?(String) && cell.empty?) ? nil : cell
+      end
+
+      # A really specific instance of merged cells in the CLA table on row 28
+      next if sheet[:name] == 'CLA_05-06_to_16-17' && data_element["NPDAlias"].nil?
+
+      # Post-process to add structure
+      # TODO: cope with SUM SC Addresses
+      data_element["Collection term"] = data_element["Collection term"]&.split(', ')
+
+      npd_alias = data_element.delete("NPDAlias") || data_element.delete('NPD Alias ') || data_element["NPD Alias"]
+      npd_alias = npd_alias.split("\n")
+      data_element["NPD Alias"] = npd_alias
+
+      
+
+      # Years can be written as "2006/07 only. Coerce that into "2006/07 - 2006-07" for consistency.
+      years_populated = data_element.delete("Years populated") || data_element["Years Populated"]
+
+      # KS3 Result Table contains no years collected data
+      if years_populated
+        years_populated = years_populated.gsub(/(.*) only/, '\1 - \1')
+        data_element["Years Populated"] = years_populated
+
+        # Break up years into array [start, end]
+        years_populated = years_populated.split(/ *- */)
+
+        # Create collected_from for collection from Years Populated
+        start_year = years_populated.first[0..3].to_i
+        start_date = Date.new(start_year,9,1)
+        data_element[:collected_from] = years_populated.first
+        data_element[:collected_from_date] = start_date
+
+        # Create collected_until for collection from Years Populated
+        if years_populated.size == 2
+          end_year = years_populated.last[0..3].to_i
+          end_date = Date.new(end_year + 1 ,9, 1)
+          data_element[:collected_until] = years_populated.last
+          data_element[:collected_until_date] = end_date
+        else
+          data_element[:collected_until] = 'Present'
+        end
+
+        # Finally, coerce these into a full list of years
+        # data_element["Years Populated"] = years_populated
+      end
+      
+      client.index  index: 'data_elements', type: 'data_element', body: data_element
+    end
+
+    # puts "\t#{block_name}: #{data_tables_workbook.sheet(sheet[:name]).row(block[:header_row])[0]}"
   end
-  
+  # 
+
   #puts sheet.row(5).cell(1)
   #puts "---------"
 end
